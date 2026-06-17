@@ -26,8 +26,10 @@ function DuePill({ dueDate }) {
   return <span style={{ fontSize: 12, fontWeight: 600, color }}>{label}</span>;
 }
 
-async function extractWithClaude(text, fileName) {
-  const prompt = `You are an academic assignment parser. Extract info from this assignment brief and return ONLY valid JSON, no markdown:
+async function extractWithGemini(text, fileName) {
+  const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
+
+  const prompt = `You are an academic assignment parser. Extract info from this assignment brief and return ONLY valid JSON, no markdown, no backticks:
 {
   "title": "assignment title or null",
   "module": "module/course name or null",
@@ -41,23 +43,29 @@ async function extractWithClaude(text, fileName) {
 File name: ${fileName}
 Text: ${text.substring(0, 3000)}`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": process.env.REACT_APP_ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-allow-browser": "true",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
+  const res = await fetch(
+    `/api/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [{ text: prompt }],
+          },
+        ],
+      }),
+    }
+  );
 
   const data = await res.json();
-  const raw = data.content?.find(b => b.type === "text")?.text || "{}";
+  console.log("Gemini response:", data);
+
+  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+  console.log("Raw text:", raw);
+
   return JSON.parse(raw.replace(/```json|```/g, "").trim());
 }
 
@@ -72,16 +80,16 @@ function Meta({ label, value }) {
 
 export default function App() {
   const [assignments, setAssignments] = useState([]);
-  const [processing, setProcessing] = useState(false);
+  const [processingFiles, setProcessingFiles] = useState([]);
   const [expanded, setExpanded] = useState(null);
   const [drag, setDrag] = useState(false);
   const fileRef = useRef();
 
   const processFile = useCallback(async (file) => {
-    setProcessing(true);
+    setProcessingFiles(prev => [...prev, file.name]);
     try {
       const text = await file.text();
-      const data = await extractWithClaude(text, file.name);
+      const data = await extractWithGemini(text, file.name);
       setAssignments(prev => [{
         id: Date.now(),
         fileName: file.name,
@@ -93,10 +101,11 @@ export default function App() {
         summary: data.summary || "No summary available.",
         keyTasks: data.keyTasks || [],
       }, ...prev]);
-    } catch {
-      alert("Could not process file. Please try a .txt file.");
+    } catch (err) {
+      console.error("Processing error:", err);
+      alert(`Could not process ${file.name}`);
     }
-    setProcessing(false);
+    setProcessingFiles(prev => prev.filter(n => n !== file.name));
   }, []);
 
   const handleFiles = (files) => {
@@ -120,13 +129,13 @@ export default function App() {
         <div style={{ marginBottom: 32 }}>
           <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text }}>Assignment Manager</h1>
           <p style={{ fontSize: 13, color: C.muted, marginTop: 4 }}>
-            Upload a brief — Claude extracts the details automatically.
+            Upload a brief — AI extracts the details automatically.
           </p>
         </div>
 
         {/* Upload */}
         <div
-          onClick={() => !processing && fileRef.current.click()}
+          onClick={() => processingFiles.length === 0 && fileRef.current.click()}
           onDragOver={e => { e.preventDefault(); setDrag(true); }}
           onDragLeave={() => setDrag(false)}
           onDrop={e => { e.preventDefault(); setDrag(false); handleFiles(e.dataTransfer.files); }}
@@ -135,15 +144,19 @@ export default function App() {
             borderRadius: 10,
             padding: "28px 20px",
             textAlign: "center",
-            cursor: processing ? "wait" : "pointer",
+            cursor: processingFiles.length > 0 ? "wait" : "pointer",
             background: drag ? "#eef2ff" : C.white,
             marginBottom: 28,
             transition: "all 0.15s",
           }}
         >
           <input ref={fileRef} type="file" accept=".txt" multiple style={{ display: "none" }} onChange={e => handleFiles(e.target.files)} />
-          {processing ? (
-            <p style={{ fontSize: 13, color: C.accent, fontWeight: 500 }}>Analysing with Claude…</p>
+          {processingFiles.length > 0 ? (
+            <div>
+              {processingFiles.map(name => (
+                <p key={name} style={{ fontSize: 13, color: C.accent, fontWeight: 500 }}>Analysing {name}…</p>
+              ))}
+            </div>
           ) : (
             <>
               <p style={{ fontSize: 13, fontWeight: 500, color: C.text, marginBottom: 4 }}>Drop a file or click to upload</p>
@@ -153,7 +166,7 @@ export default function App() {
         </div>
 
         {/* List */}
-        {assignments.length === 0 && !processing ? (
+        {assignments.length === 0 && processingFiles.length === 0 ? (
           <p style={{ textAlign: "center", color: C.muted, fontSize: 13, marginTop: 48 }}>No assignments yet.</p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
